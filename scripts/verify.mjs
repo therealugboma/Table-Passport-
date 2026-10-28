@@ -1,0 +1,68 @@
+// End-to-end demo check: node scripts/verify.mjs (needs `vite preview` on :4200)
+import { chromium } from 'playwright'
+const B = process.env.BASE || 'http://127.0.0.1:4200/'
+const S = 'screenshots/'
+const ok = (c, m) => { if (!c) { console.error('FAIL', m); process.exit(1) } console.log('ok ', m) }
+const br = await chromium.launch()
+const desk = await br.newContext({ viewport: { width: 1440, height: 900 } })
+const mob = await br.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true })
+const errs = []
+for (const c of [desk, mob]) c.on('page', p => p.on('pageerror', e => errs.push(e.message)))
+const d = await desk.newPage()
+await d.goto(B); await d.evaluate(() => localStorage.clear()); await d.goto(B + '#/'); await d.waitForTimeout(600)
+await d.screenshot({ path: S + '01-landing.png', fullPage: true })
+// share storage: copy desktop state into mobile context via the same origin storage events isn't possible across contexts, so run mobile flows in a page that syncs via localStorage snapshot
+const sync = async (from, to) => { const s = await from.evaluate(() => JSON.stringify(localStorage)); await to.evaluate(s => { const o = JSON.parse(s); localStorage.clear(); for (const k in o) localStorage.setItem(k, o[k]) }, s); await to.reload() }
+const m = await mob.newPage(); await m.goto(B + '#/install'); await sync(d, m)
+// installer
+await m.waitForSelector('[data-testid=sticker]'); await m.screenshot({ path: S + '05-installer-mobile.png' })
+await m.fill('[data-testid=sticker]', 'TP-001231'); await m.click('[data-testid=next]')
+await m.click('[data-testid=order-ORD-1042]'); await m.click('[data-testid=next]')
+await m.check('[data-testid=specok]'); await m.screenshot({ path: S + '05b-installer-spec.png' }); await m.click('[data-testid=next]')
+await m.click('text=Use sample photo'); await m.click('[data-testid=next]')
+await m.click('[data-testid=next]')
+await m.fill('[data-testid=oname]', 'Adaeze Bello'); await m.fill('[data-testid=ophone]', '+234 803 410 2231'); await m.check('[data-testid=consent]'); await m.click('[data-testid=next]')
+const box = await m.locator('[data-testid=sign]').boundingBox()
+await m.mouse.move(box.x + 30, box.y + 100); await m.mouse.down(); for (let i = 0; i < 20; i++) await m.mouse.move(box.x + 30 + i * 12, box.y + 100 - Math.sin(i / 2) * 40); await m.mouse.up()
+await m.click('[data-testid=register]'); await m.waitForSelector('[data-testid=registered]'); ok(true, 'installer registered table')
+await m.screenshot({ path: S + '05c-installer-done.png', fullPage: true })
+await m.click('[data-testid=open-passport]'); await m.waitForSelector('[data-testid=auth]')
+ok((await m.textContent('[data-testid=auth]')).includes('Genuine'), 'new passport visible + genuine')
+await m.goto(B + '#/p/EMR-SN-24-0117'); await m.waitForTimeout(500)
+await m.screenshot({ path: S + '02-passport-mobile.png' }); await m.screenshot({ path: S + '02b-passport-mobile-full.png', fullPage: true })
+// dashboard: simulate +6 months
+await sync(m, d); await d.goto(B + '#/app/reminders'); await d.click('[data-testid=sim6]'); await d.waitForSelector('[data-testid=sim-result]')
+ok(/[1-9]\d* reminder/.test(await d.textContent('[data-testid=sim-result]')), 'reminders sent: ' + await d.textContent('[data-testid=sim-result]'))
+ok((await d.textContent('[data-testid=wa-preview]')).includes('Adaeze'), 'WA preview for newly registered owner')
+await d.screenshot({ path: S + '07-reminders-whatsapp.png' })
+const link = await d.getAttribute('[data-testid=wa-link]', 'href')
+// booking on mobile
+await sync(d, m); await m.goto(B + link); await m.waitForSelector('[data-testid=confirm]')
+await m.click('[data-testid=svc-recloth]'); await m.locator('[data-testid=slot]:not([disabled])').nth(1).click()
+await m.screenshot({ path: S + '03-booking-mobile.png' })
+await m.click('[data-testid=confirm]'); await m.waitForSelector('[data-testid=confirmed]')
+const ref = (await m.textContent('[data-testid=confirmed] .label.acc')).split('·')[1].trim(); ok(ref.startsWith('SV-'), 'booked ' + ref)
+await m.screenshot({ path: S + '03b-booking-confirmed.png' })
+// dashboard sees it live (storage event): open bookings first in a page, then write state
+await d.goto(B + '#/app/bookings'); await sync(m, d); await d.waitForSelector(`[data-testid=bk-${ref}]`); ok(true, 'booking visible in dashboard')
+await d.selectOption(`[data-testid=assign-${ref}]`, 't1'); await d.screenshot({ path: S + '08-bookings.png' })
+await d.click(`[data-testid=done-${ref}]`); await d.waitForTimeout(300)
+await d.goto(B + '#/p/EMR-SN-26-0231'); await d.waitForSelector('[data-testid=timeline]')
+ok((await d.textContent('[data-testid=timeline]')).includes('Re-cloth'), 'history updated with completed re-cloth')
+// verify
+await sync(d, m); await m.goto(B + '#/verify/EMR-SN-24-0117'); await m.waitForSelector('[data-testid=result-genuine]'); ok(true, 'verify genuine')
+await m.screenshot({ path: S + '04-verify-genuine.png' })
+await m.goto(B + '#/verify/FAKE-1234'); await m.waitForSelector('[data-testid=result-unknown]'); ok(true, 'verify unknown')
+await m.screenshot({ path: S + '04b-verify-unknown.png' })
+await d.setViewportSize({ width: 1440, height: 900 }); await d.goto(B + '#/verify'); await d.fill('[data-testid=serial]', 'EMR-SN-99-0000'); await d.click('[data-testid=check]'); await d.waitForSelector('[data-testid=result-unknown]')
+await d.screenshot({ path: S + '04c-verify-desktop.png' })
+await d.goto(B + '#/app/alerts'); ok((await d.textContent('[data-testid=alerts]')).includes('EMR-SN-99-0000'), 'unknown scan logged in alerts')
+await d.goto(B + '#/app'); await d.waitForTimeout(700); await d.screenshot({ path: S + '06-dashboard-overview.png' })
+await d.goto(B + '#/app/tables/EMR-SN-26-0231'); await d.waitForTimeout(400); await d.screenshot({ path: S + '09-tables-registry.png' })
+await d.goto(B + '#/print/stickers'); await d.waitForTimeout(800); await d.screenshot({ path: S + '10-qr-sticker-sheet.png', fullPage: true })
+await d.goto(B + '#/print/plate/EMR-SN-24-0117'); await d.waitForTimeout(600); await d.screenshot({ path: S + '11-qr-plate.png' })
+await m.goto(B + '#/r/EMR-SN-24-0117'); await m.waitForTimeout(400); await m.screenshot({ path: S + '12-resale-mobile.png', fullPage: true })
+await d.goto(B + '#/app'); await d.evaluate(() => localStorage.setItem('tpassport.v1.pref.tourOpen', '1')); await d.reload(); await d.waitForTimeout(500); await d.screenshot({ path: S + '13-tour.png' })
+await d.evaluate(() => localStorage.clear()); await d.goto(B + '#/app'); await d.reload(); await d.waitForTimeout(700); await d.screenshot({ path: S + '06-dashboard-overview.png' })
+ok(errs.length === 0, 'no page errors ' + errs.join(' | '))
+await br.close()
